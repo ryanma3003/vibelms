@@ -3,6 +3,7 @@
  * three's built-in WebGL2 fallback otherwise. No external model assets.
  */
 import {
+  CapsuleGeometry,
   CatmullRomCurve3,
   CircleGeometry,
   Color,
@@ -50,6 +51,11 @@ const PALETTE = {
   white: '#ffffff',
 }
 
+const ARM_LENGTH = 0.5
+const ACTION_SECONDS = { wave: 2.6, groom: 3.6 }
+/** Arm meshes hang along -Y from the shoulder pivot. */
+const DOWN = new Vector3(0, -1, 0)
+
 function mat(color: string, roughness = 0.65) {
   return new MeshStandardMaterial({ color, roughness, metalness: 0 })
 }
@@ -82,6 +88,20 @@ function buildCat() {
   }
   body.position.y = -0.55
   cat.add(body)
+
+  // Arms: pivot at the shoulder so every pose is a single rotation; paw at the arm's end.
+  const arms = [-1, 1].map((side) => {
+    const pivot = new Group()
+    pivot.position.set(side * 0.48, -0.12, 0.32)
+    const limb = new Mesh(new CapsuleGeometry(0.1, ARM_LENGTH - 0.1, 6, 16), fur)
+    limb.position.y = -ARM_LENGTH / 2
+    const paw = new Mesh(sphere, cream)
+    paw.scale.set(0.13, 0.12, 0.13)
+    paw.position.y = -ARM_LENGTH
+    pivot.add(limb, paw)
+    cat.add(pivot)
+    return pivot
+  })
 
   // Tail
   const tail = new Group()
@@ -179,7 +199,7 @@ function buildCat() {
   shadow.position.y = -1.32
   shadow.scale.set(1, 0.6, 1)
 
-  return { cat, head, eyes, lids, ears, tail, body, shadow }
+  return { cat, head, eyes, lids, ears, tail, body, shadow, arms }
 }
 
 function buildConfetti(count: number) {
@@ -247,6 +267,11 @@ export async function createCatScene(
   let frame = 0
   let nextBlink = 2
   let blinkStart = -1
+  let action: 'wave' | 'groom' = 'groom'
+  let actionStart = -Infinity
+  let nextAction = 1.2 // greet with a wave shortly after appearing
+  const armDir = new Vector3()
+  const pose = new Vector3()
   const tmpM = new Matrix4()
   const tmpQ = new Quaternion()
   const tmpV = new Vector3()
@@ -266,24 +291,55 @@ export async function createCatScene(
     look.y += (pointer.y - look.y) * k
     scrollSmooth += (scroll - scrollSmooth) * (motion ? k : 1)
 
-    // Head & eye tracking
-    parts.head.rotation.y = look.x * 0.55
-    parts.head.rotation.x = -look.y * 0.3 + scrollSmooth * 0.35
-    parts.head.rotation.z = -look.x * 0.08
+    // Arm actions: alternate a greeting wave and a quick face-grooming session.
+    let wave = 0
+    let groom = 0
+    if (motion) {
+      if (opts.mode === 'celebrate') wave = 1
+      else {
+        if (t > nextAction) {
+          action = action === 'wave' ? 'groom' : 'wave'
+          actionStart = t
+          nextAction = t + ACTION_SECONDS[action] + 3 + Math.random() * 2
+        }
+        const elapsed = t - actionStart
+        const w = MathUtils.smoothstep(Math.min(elapsed, ACTION_SECONDS[action] - elapsed), 0, 0.45)
+        if (action === 'wave') wave = w
+        else groom = w
+      }
+    }
+    parts.arms.forEach((pivot, i) => {
+      const side = i === 0 ? -1 : 1
+      armDir.set(side * 0.25, -1, 0.5).normalize() // rest: hanging over the belly
+      const waving = opts.mode === 'celebrate' || side === 1 ? wave : 0
+      if (waving) armDir.lerp(pose.set(side * (0.55 + 0.35 * Math.sin(t * 9 + i)), 1, 0.3).normalize(), waving)
+      if (side === -1 && groom) {
+        // Paw to the muzzle, rubbing in small circles.
+        armDir.lerp(pose.set(0.36 + 0.12 * Math.sin(t * 8), 0.34 + 0.1 * Math.sin(t * 8 + 1), 0.46).normalize(), groom)
+      }
+      pivot.quaternion.setFromUnitVectors(DOWN, armDir.normalize())
+    })
+
+    // Head & eye tracking; while grooming the head turns and tilts into the paw.
+    parts.head.rotation.y = MathUtils.lerp(look.x * 0.55, -0.25, groom)
+    parts.head.rotation.x = MathUtils.lerp(-look.y * 0.3 + scrollSmooth * 0.35, 0.12 + 0.05 * Math.sin(t * 8), groom)
+    parts.head.rotation.z = MathUtils.lerp(-look.x * 0.08, 0.22, groom)
     parts.eyes.position.set(look.x * 0.04, look.y * 0.03, 0)
     parts.cat.rotation.y = look.x * 0.18 + scrollSmooth * 0.9
 
-    // Blink
+    // Blink; eyes stay contentedly half-shut while grooming.
     if (t > nextBlink && blinkStart < 0) blinkStart = t
+    let lid = 1
     if (blinkStart >= 0) {
       const p = (t - blinkStart) / 0.16
-      const s = p < 1 ? Math.max(0.08, Math.abs(1 - 2 * p)) : 1
-      parts.lids.forEach((m, i) => (m.scale.y = (i % 2 ? 0.045 : 0.15) * s))
+      lid = p < 1 ? Math.max(0.08, Math.abs(1 - 2 * p)) : 1
       if (p >= 1) {
         blinkStart = -1
         nextBlink = t + 2.5 + Math.random() * 3
       }
     }
+    lid = Math.min(lid, 1 - 0.85 * groom)
+    parts.lids.forEach((m, i) => (m.scale.y = (i % 2 ? 0.045 : 0.15) * lid))
 
     if (motion) {
       const celebrate = opts.mode === 'celebrate'
